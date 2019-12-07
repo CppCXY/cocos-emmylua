@@ -6,10 +6,12 @@ parser=argparse.ArgumentParser()
 parser.description="trans cocos tolua++ lua api to emmylua api"
 parser.add_argument("-i","--input",help="input dir path",type=str)
 parser.add_argument("-o","--output",help="output file path",type=str)
+parser.add_argument("-p","--pakage",help="is out as one file",type=bool)
 args=parser.parse_args()
 
-inputPath=args.input
-outPath=args.output
+inputPath=args.input or "api"
+outPath=args.output or "out"
+pk=args.pakage
 
 EmptyRe=re.compile(r'^\s*$')
 NormalRe=re.compile(r'^\s*--\s(?!@)(?P<comment>.*)')
@@ -19,14 +21,12 @@ FunctionRe=re.compile(r'\s*\[parent=#(?P<parent>[^\]]+)\]\s*(?P<func>\w+)')
 ParamRe=re.compile(r'\s*((#(?=unsigned)(?P<ptype_u>unsigned [\w.:]+))|(#)(?P<ptype>[\w.:]+))?\s*(?P<param>\w+)\s*(?P<subComment>.+)?')
 returnRe=re.compile(r'.+\(return\s+value:\s*(?P<rtype>[^\)]+)\)')
 commentTemplate="""
-
 ---@class {0}.{1} {2}
 local {1}={{ }}
----@class {1} : {0}.{1}
 {0}.{1}={1}
 
 """
-
+#---@alias {1} {0}.{1}
 
 transFunc={
     "end":"endToLua"
@@ -51,7 +51,24 @@ transType={
     "cc.Terrain::TerrainData":"cc.Terrain.TerrainData",
     "unsigned int":"unsigned_int",
     "unsigned char":"unsigned_char",
-    "bool":"boolean"
+    "bool":"boolean",
+    "cc.backend::ProgramState":"cc.backend.ProgramState",
+    "cc.backend::Buffer":"cc.backend.Buffer",
+    "cc.backend::TextureBacken":"cc.backend.TextureBacken",
+    "cc.backend::UniformLocation":"cc.backend.UniformLocation",
+    "cc.backend::Program":"cc.backend.Program",
+    "cc.backend::TextureBackend":"cc.backend.TextureBackend",
+    "cc.backend::ShaderCache":"cc.backend.ShaderCache",
+    "cc.backend::ShaderModule":"cc.backend.ShaderModule",
+    "cc.backend::Texture2DBackend":"cc.backend.Texture2DBackend",
+    "cc.backend::SamplerDescriptor":"cc.backend.SamplerDescriptor",
+    "cc.backend::TextureDescriptor":"cc.backend.TextureDescriptor",
+    "cc.backend::SamplerDescripto":"cc.backend.SamplerDescripto",
+    "cc.backend::TextureCubemapBackend":"cc.backend.TextureCubemapBackend",
+    "cc.backend::TextureCubemapBackend":"cc.backend.TextureCubemapBackend",
+    "cc.backend::VertexLayout":"cc.backend.VertexLayout",
+
+
 }
 #空着
 defineClass=set([
@@ -61,7 +78,8 @@ defineClass=set([
     "boolean",
     "nil",
     "function",
-    "userdata"
+    "userdata",
+    "self"
 ])
 #自己写，也可以不写
 #用来给未定义的类型比如int，提供alias或者class声明
@@ -72,6 +90,13 @@ unDefineClass={
 Namespace={
 
 }
+#不要管
+Alias={
+    
+}
+FirstWrite="""
+---require emmylua 0.3.36
+"""
 
 def transferDisableType(name):
 
@@ -90,37 +115,76 @@ def transferDisableFuncName(name):
     result=transFunc.get(name,None)
     return result if result is not None else name
 
+class FunctionComment:
+    def __init__(self):
+        self.name=""
+        self.parent=""
+        self.params=[]
+        self.overload=[]
+        self.rtype="void"
+        self.comment=[]
+        self.paramsTypes=[]
 
+    def implement(self):
+        if len(self.overload)!=0: 
+            newOverload=[]   
+            for comment in self.overload:
+                params=[]
+                index=0
+                for param in comment.split(","):
+                    param=transferDisableType(param.strip())
+                    if param=="self":
+                        continue
+                    if param==self.paramsTypes[index]:
+                        params.append(self.paramsTypes[index]+":"+param)
+                    else:
+                        params.append(self.paramsTypes[index]+str(index)+":"+param)
+                    index=index+1
+                rtype="self" if Alias.get(self.rtype)==Alias.get(self.parent) else self.rtype
+                newOverload.append("---@overload fun({0}):{1}".format(",".join(params),rtype))
 
+            self.overload=newOverload
+    def dump(self):
+        if self.name=="":
+            return ""
+        result=[]
+        if len(self.comment)!=0:
+            result.append("\n".join(self.comment))
+        if len(self.overload)!=0:
+            result.append("\n".join(self.overload))
+        if len(self.params)!=0:
+            result.append("\n".join(["---@param {0} {1}".format(param,paramType)  for param,paramType in zip(self.params,self.paramsTypes)   ]))
+        rtype=self.rtype
+        if Alias.get(rtype)==Alias.get(self.parent):
+            result.append("---@return self")
+        else:
+            result.append("---@return {0}".format(rtype))
+        result.append("function {0}:{1} ({2}) end".format(self.parent,self.name, ",".join(self.params)))
+        return "\n".join(result)
 class ClassComment:
     def __init__(self):
         self.name=""
         self.parent=""
         self.extend=""
-        self.stack=[]
-        self.currentFunction=""
-        self.params=[]
-        self.paramTypes=[]
+        self.func=FunctionComment()
         self.results=[]
-        self.overload=[]
-        self.rtype="void"
 
     def append(self,head,comment):
         if head=="module":
             self.name=comment.strip()
         elif head=="extend":
-            if comment.find(","):
-                self.extend=": "+comment.replace(",","@",1)
-            else:
-                self.extend=": "+comment
+            self.extend=comment.strip()
         elif head=="parent_module":
             self.parent=comment.strip()
+            if self.parent not in Namespace:
+                Namespace[self.parent]="---@class {0}\n{0}={{}}\n".format(self.parent)
         elif head=="function":
             mc=FunctionRe.match(comment)
             parent=mc.group('parent')
             func=mc.group('func')
             func=transferDisableFuncName(func)
-            self.currentFunction=parent+":"+func
+            self.func.name=func
+            self.func.parent=parent
         elif head=="param":
             mc=ParamRe.match(comment)
             param=mc.group('param')
@@ -136,64 +200,55 @@ class ClassComment:
             subComment=mc.group('subComment')
             if subComment is None:
                 subComment=comment
-            self.params.append(param.strip())
-            self.paramTypes.append(ctype.strip())
-            self.stack.append("---@param {0} {1}@{2}".format(param,ctype,subComment))                
+            self.func.params.append(param.strip())
+            self.func.paramsTypes.append(ctype.strip())
+            #self.stack.append("---@param {0} {1}@{2}".format(param,ctype,subComment))                
         elif head=="return":
             mc=returnRe.match(comment)
             rtype=mc.group('rtype')
             rtype=transferDisableType(rtype)
             subComment=comment
-            self.rtype=rtype or "void"
-            self.stack.append("---@return {0}@{1}".format(rtype,subComment))    
+            self.func.rtype=rtype
+            #self.stack.append("---@return {0}@{1}".format(rtype,subComment))    
         elif head=="normal":
-            self.stack.append("---* "+comment)
+            self.func.comment.append("---* "+comment)
         elif head=="overload":
-            self.overload.append(comment)
+            self.func.overload.append(comment)
 
     def implement(self):
-        if self.currentFunction!="":
-            self.results.append("\n".join(self.stack))
-            if len(self.overload)!=0:
-                
-                for comment in self.overload:
-                    params=[]
-                    index=0
-                    for param in comment.split(","):
-                        param=transferDisableType(param.strip())
-                        if param=="self":
-                            continue
-                        if param==self.paramTypes[index]:
-                            params.append(self.params[index]+":"+param)
-                        else:
-                            params.append("unkown"+str(index)+":"+param)
-                        index=index+1
-                    self.results.append("---@overload fun({0}):{1}".format(",".join(params),self.rtype))
-                self.overload=[]
-            self.results.append("function {0}({1}) end".format(self.currentFunction,",".join(self.params)))
-            self.params=[]
-            self.paramTypes=[]
-            self.rtype="void"
-            self.currentFunction=""
-            self.stack=[]
+        self.func.implement()
+        self.results.append(self.func)
+        self.func=FunctionComment()
 
-    def dump(self,results):
+    def dump(self):
         self.implement()
-
         if self.parent=="":
-            return
+            return ""
 
         defineClass.add("{0}.{1}".format(self.parent,self.name))
-        defineClass.add("{0}".format(self.name))
+        #defineClass.add("{0}".format(self.name))
         unDefineClass.pop("{0}.{1}".format(self.parent,self.name),1)
-        unDefineClass.pop("{0}".format(self.name),1)
-        if self.parent not in Namespace:
-            Namespace[self.parent]="---@class {0}\n{0}={{}}\n".format(self.parent)
-        results.append(commentTemplate.format(self.parent,self.name,self.extend))
-        results.append("\n".join(self.results))
+        #unDefineClass.pop("{0}".format(self.name),1)
+
+        
+        oldextend=self.extend
+        extends=self.extend.split(",")
+        #emmylua当前只支持单继承
+        extend=extends[0]
+        extend=Alias.get(extend,"")
+        
+        if extend !="" :
+            extend=":"+extend
+        if len(extends) !=1:
+            extend=extend+"@all parent class: "+oldextend
+        results=[]
+        results.append(commentTemplate.format(self.parent,self.name,extend))
+        for func in self.results:
+            results.append(func.dump())
+        return "\n".join(results)
 
 def CheckLine(line):
-    mc:re.Match=EmptyRe.match(line)
+    mc=EmptyRe.match(line)
     if mc is not None:
         return "EMPTY_LINE",None
     mc=NormalRe.match(line)
@@ -218,30 +273,53 @@ def ParseLine(line,comment):
         comment.implement()
 
 def ParseFile(filePath,results):
-    #results=[]
+    
     file=open(filePath,'r',encoding="utf8")
     cm=ClassComment()
     for line in file.readlines():
         ParseLine(line,cm)
     file.close()
-    cm.dump(results)
+    if cm.parent is not "":
+        name="{0}.{1}".format(cm.parent,cm.name) 
+        aliasName=cm.name
+        Alias[name]=name
+        Alias[aliasName]=name
+    results.append(cm)
 
-    #file=open(outPath,'w',encoding="utf8")
-    #cm.dump(file)
-    #file.close()
+def outFile(outPath,results):
+    if pk:
+        file=open(outPath+".lua",'w',encoding="utf8")
+        file.write(FirstWrite+"\n")
+        for _,comment in Namespace.items():
+            file.write(comment)
+        file.write( "\n".join([ result.dump() for result in results]))
+        for _,value in unDefineClass.items():
+            file.write(value+"\n\n")
+        file.close()
+    else:
+        if not os.path.exists(outPath):
+            os.mkdir(outPath)
+        gl=open(outPath+"/global.lua","w",encoding="utf8")
+        gl.write(FirstWrite+"\n")
+        for _,comment in Namespace.items():
+            gl.write(comment)
+        for result in results:
+            resultStr=result.dump()
+            if resultStr=="":
+                continue
+            file=open(outPath+"/{0}.{1}".format(result.parent,result.name)+".lua","w",encoding="utf8")
+            file.write(resultStr)
+            file.close()
+        for _,value in unDefineClass.items():
+            gl.write(value+"\n\n")
+        gl.close()
 
 
 def ParseDir(fileDirPath,outPath):
     results=[]
-   
     for filePath in os.listdir(fileDirPath):
         ParseFile(fileDirPath+"/"+filePath,results)
-    file=open(outPath+".lua",'w',encoding="utf8")
-    for _,comment in Namespace.items():
-        file.write(comment)
-    file.write("\n".join(results))
-    for _,value in unDefineClass.items():
-        file.write(value+"\n\n")
-    file.close()
+    outFile(outPath,results)
+
 
 ParseDir(inputPath,outPath)
